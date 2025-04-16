@@ -50,7 +50,7 @@ class LipReaderSystem:
         # self.lipnet_model.compile(optimizer=Adam(learning_rate=0.0001),
         #                           loss={'ctc': lambda y_true, y_pred: y_pred})
         # Create multimodal model
-        self.multimodal_model = self._build_multimodal_model()
+        # self.multimodal_model = self._build_multimodal_model()
 
     def load_model(self):
         """Load pre-trained LipNet model"""
@@ -265,6 +265,10 @@ class LipReaderSystem:
         # Extract mouth frames
         mouth_frames = self.extract_mouth_frames(video_path)
         mouth_frames = np.expand_dims(mouth_frames, axis=0)
+
+        # Reshape mouth frames to have the same number of channels as audio features
+        if len(mouth_frames.shape) == 2:
+            mouth_frames = mouth_frames[:, :, None]
         
         # Extract audio features
         audio_features = self.extract_audio_features(video_path)
