@@ -39,15 +39,74 @@ predictor = dlib.shape_predictor(SHAPE_PREDICTOR_PATH)
 
 class LipReaderSystem:
     def __init__(self, lipnet_model_path):
+        self.model_path = lipnet_model_path
+        self.lipnet_model = None
+        self.char_to_idx = None
+        self.idx_to_char = None
+        self.load_model()
         # Load the pre-trained LipNet model
         # self.lipnet_model = load_model(lipnet_model_path, compile=False)
-        self.lipnet_model = tf.keras.models.load_model(lipnet_model_path, compile=False)
-        self.lipnet_model.compile(optimizer=Adam(learning_rate=0.0001), 
-                                  loss={'ctc': lambda y_true, y_pred: y_pred})
-        
+        # self.lipnet_model = tf.keras.models.load_model(lipnet_model_path, compile=False)
+        # self.lipnet_model.compile(optimizer=Adam(learning_rate=0.0001),
+        #                           loss={'ctc': lambda y_true, y_pred: y_pred})
         # Create multimodal model
         self.multimodal_model = self._build_multimodal_model()
-        
+
+    def load_model(self):
+        """Load pre-trained LipNet model"""
+        # Define character mapping (simplified example - actual might be more complex)
+        # This is a placeholder - you'd need the actual character mapping used for training
+        chars = "abcdefghijklmnopqrstuvwxyz' "
+        self.char_to_idx = {char: idx for idx, char in enumerate(chars)}
+        self.idx_to_char = {idx: char for idx, char in enumerate(chars)}
+
+        # Create a simplified LipNet model structure (you'd replace with actual architecture)
+        try:
+            self.lipnet_model = tf.keras.models.load_model(self.model_path)
+            print("LipNet model loaded successfully")
+        except Exception as e:
+            print(f"Error loading LipNet model: {e}")
+            # Create placeholder model for demo purposes
+            # In real implementation, you'd use the actual LipNet architecture
+            input_shape = (75, 64, 128, 3)  # Example: 75 frames, 64x128 resolution, 3 channels
+            self.lipnet_model = self._create_lipnet_placeholder(input_shape, len(chars))
+            print("Created placeholder LipNet model")
+
+    def _create_lipnet_placeholder(self, input_shape, num_classes):
+        """Create a simplified LipNet architecture as placeholder"""
+        inputs = tf.keras.Input(shape=input_shape)
+
+        # Simplified convolutional frontend
+        x = tf.keras.layers.TimeDistributed(tf.keras.layers.Conv2D(32, (3, 3), padding='same'))(inputs)
+        x = tf.keras.layers.TimeDistributed(tf.keras.layers.BatchNormalization())(x)
+        x = tf.keras.layers.TimeDistributed(tf.keras.layers.Activation('relu'))(x)
+        x = tf.keras.layers.TimeDistributed(tf.keras.layers.MaxPooling2D((2, 2)))(x)
+
+        # More conv layers would go here in real implementation
+        x = tf.keras.layers.TimeDistributed(tf.keras.layers.Conv2D(64, (3, 3), padding='same'))(x)
+        x = tf.keras.layers.TimeDistributed(tf.keras.layers.BatchNormalization())(x)
+        x = tf.keras.layers.TimeDistributed(tf.keras.layers.Activation('relu'))(x)
+        x = tf.keras.layers.TimeDistributed(tf.keras.layers.MaxPooling2D((2, 2)))(x)
+
+        # Reshape for RNN
+        x = tf.keras.layers.TimeDistributed(tf.keras.layers.Flatten())(x)
+
+        # RNN layers
+        x = tf.keras.layers.Bidirectional(tf.keras.layers.GRU(256, return_sequences=True))(x)
+        x = tf.keras.layers.Bidirectional(tf.keras.layers.GRU(256, return_sequences=True))(x)
+
+        # Output layer
+        outputs = tf.keras.layers.Dense(num_classes + 1, activation='softmax')(x)  # +1 for CTC blank
+
+        model = tf.keras.Model(inputs=inputs, outputs=outputs)
+        model.compile(optimizer='adam', loss=self._ctc_loss_placeholder)
+
+        return model
+
+    def _ctc_loss_placeholder(self, y_true, y_pred):
+        """Placeholder for CTC loss - in real implementation use actual CTC loss"""
+        return tf.reduce_mean(y_pred - y_true)
+
     def _build_multimodal_model(self):
         """Build a model that combines LipNet features with audio features"""
         
