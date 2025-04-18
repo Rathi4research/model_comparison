@@ -22,6 +22,7 @@ import time
 
 # Configuration
 VIDEO_PATH = "D:\Codebase\model_comparison\\test_videos\ABOUT.mp4"
+# VIDEO_PATH = "D:\Codebase\model_comparison\test_videos\hi.mp4"
 SHAPE_PREDICTOR_PATH = "D:\Codebase\model_comparison\pretrained_models\shape_predictor_68_face_landmarks.dat"
 LIPNET_MODEL_PATH = "D:\Codebase\model_comparison\pretrained_models\lipnet_weights.h5"
 
@@ -109,11 +110,23 @@ class LipReaderSystem:
 
     def _build_multimodal_model(self):
         """Build a model that combines LipNet features with audio features"""
-        
-        # We'll assume the LipNet model has an intermediate layer we can tap into
-        # to extract features before the final classification
-        visual_features = self.lipnet_model.layers[-2].output
-        
+
+        # Use the correct input shape for the LipNet model
+        # This should match what the pre-trained model expects
+        visual_input = Input(shape=(75, 64, 128, 3))  # Use actual dimensions expected by LipNet
+
+        # Create a copy of the LipNet model with shared weights
+        # Extract features from the second-to-last layer
+        for layer in self.lipnet_model.layers:
+            layer.trainable = False  # Freeze LipNet weights
+
+        # Get the intermediate layer output
+        intermediate_layer_model = Model(inputs=self.lipnet_model.input,
+                                         outputs=self.lipnet_model.layers[-2].output)
+
+        # Process visual input through LipNet
+        visual_features = intermediate_layer_model(visual_input)
+
         # Audio input and processing branch
         audio_input = Input(shape=(SEQUENCE_LENGTH, 13))  # MFCC features
         x = Conv1D(128, kernel_size=5, activation='relu', padding='same')(audio_input)
@@ -122,116 +135,125 @@ class LipReaderSystem:
         x = MaxPooling1D(pool_size=2)(x)
         x = LSTM(128, return_sequences=True)(x)
         x = LSTM(64, return_sequences=True)(x)
-        audio_features = Dense(128, activation='relu')(x)
-        
+
+        # Get the output shape from visual features
+        visual_feature_shape = visual_features.shape
+
+        # Reshape audio features to match visual features
+        # Adjust the Dense layer to output the right dimension
+        audio_features = Dense(visual_feature_shape[-1], activation='relu')(x)
+
         # Combine visual and audio features
-        combined = concatenate([visual_features, audio_features])
-        
+        combined = concatenate([visual_features, audio_features], axis=1)
+
         # Final classification layers
         x = Dense(128, activation='relu')(combined)
         x = Dropout(0.3)(x)
         output = Dense(len(VOCAB) + 1, activation='softmax')(x)
-        
+
         # Create the multimodal model
         multimodal_model = Model(
-            inputs=[self.lipnet_model.input, audio_input],
+            inputs=[visual_input, audio_input],
             outputs=output
         )
-        
+
+        # Use a more appropriate loss function
         multimodal_model.compile(
             optimizer=Adam(learning_rate=0.0001),
-            loss={'ctc': lambda y_true, y_pred: y_pred}
+            loss='categorical_crossentropy'  # Or CTC loss if applicable
         )
-        
+
         return multimodal_model
-    
+
     def extract_mouth_frames(self, video_path, augment=False):
         """Extract mouth ROI from video frames"""
         cap = cv2.VideoCapture(video_path)
         frames = []
-        
+
         while True:
             ret, frame = cap.read()
             if not ret:
                 break
-                
-            # Convert to grayscale
-            gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
-            
+
+            # Convert to RGB (LipNet expects 3 channels)
+            frame_rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+
             # Detect faces
+            gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
             faces = detector(gray)
+
             if len(faces) > 0:
                 # Get facial landmarks
                 landmarks = predictor(gray, faces[0])
-                
+
                 # Extract mouth coordinates (landmarks 48-68 are for the mouth)
                 mouth_points = []
                 for i in range(48, 68):
                     mouth_points.append((landmarks.part(i).x, landmarks.part(i).y))
-                
+
                 # Determine bounding box for mouth
                 x_min = min(pt[0] for pt in mouth_points)
                 y_min = min(pt[1] for pt in mouth_points)
                 x_max = max(pt[0] for pt in mouth_points)
                 y_max = max(pt[1] for pt in mouth_points)
-                
+
                 # Add some margin
                 margin = 10
                 x_min = max(0, x_min - margin)
                 y_min = max(0, y_min - margin)
                 x_max = min(frame.shape[1], x_max + margin)
                 y_max = min(frame.shape[0], y_max + margin)
-                
+
                 # Extract mouth ROI
-                mouth_roi = gray[y_min:y_max, x_min:x_max]
-                
-                # Resize to fixed dimensions
+                mouth_roi = frame_rgb[y_min:y_max, x_min:x_max]
+
+                # Resize to match LipNet's expected dimensions (64x128)
                 if mouth_roi.size > 0:
-                    mouth_roi = cv2.resize(mouth_roi, (MOUTH_WIDTH, MOUTH_HEIGHT))
-                    
+                    mouth_roi = cv2.resize(mouth_roi, (128, 64))
+
                     # Normalize
                     mouth_roi = mouth_roi / 255.0
-                    
+
                     frames.append(mouth_roi)
-        
+
         cap.release()
-        
-        # If we need to trim or pad to reach SEQUENCE_LENGTH
-        if len(frames) < SEQUENCE_LENGTH:
+
+        # Convert to numpy array
+        frames = np.array(frames)
+
+        # If we need to trim or pad to reach 75 frames (LipNet's expected sequence length)
+        target_length = 75  # LipNet's expected sequence length
+
+        if len(frames) < target_length:
             # Pad with zeros
-            padding = [np.zeros((MOUTH_HEIGHT, MOUTH_WIDTH)) for _ in range(SEQUENCE_LENGTH - len(frames))]
-            frames.extend(padding)
-        elif len(frames) > SEQUENCE_LENGTH:
-            # Trim to SEQUENCE_LENGTH
-            frames = frames[:SEQUENCE_LENGTH]
-            
-        return np.array(frames)
-    
-    def extract_audio_features(self, video_path):
-        """Extract MFCC features from video's audio"""
-        # Extract audio from video
-        temp_audio_path = "temp_audio.wav"
-        os.system(f"ffmpeg -i {video_path} -vn -acodec pcm_s16le -ar 16000 -ac 1 {temp_audio_path} -y")
-        
-        # Load audio and extract MFCCs
-        y, sr = librosa.load(temp_audio_path, sr=16000)
-        mfccs = librosa.feature.mfcc(y=y, sr=sr, n_mfcc=13)
-        
-        # Transpose to get time steps as first dimension
-        mfccs = mfccs.T
-        
+            padding = np.zeros((target_length - len(frames), 64, 128, 3))
+            frames = np.vstack([frames, padding])
+        elif len(frames) > target_length:
+            # Trim to target_length
+            frames = frames[:target_length]
+
+        return frames
+
+    def extract_audio_features_alternative(self, video_path):
+        """Extract MFCC features directly using librosa without ffmpeg"""
+        try:
+            # Try loading audio directly with librosa
+            y, sr = librosa.load(video_path, sr=16000, mono=True)
+            mfccs = librosa.feature.mfcc(y=y, sr=sr, n_mfcc=13)
+            mfccs = mfccs.T  # Transpose
+        except Exception as e:
+            print(f"Error extracting audio with librosa: {str(e)}")
+            # Return dummy data if extraction fails
+            mfccs = np.zeros((SEQUENCE_LENGTH, 13))
+            return mfccs
+
         # Match the sequence length
         if mfccs.shape[0] < SEQUENCE_LENGTH:
-            # Pad with zeros
             padding = np.zeros((SEQUENCE_LENGTH - mfccs.shape[0], mfccs.shape[1]))
             mfccs = np.vstack((mfccs, padding))
         elif mfccs.shape[0] > SEQUENCE_LENGTH:
-            # Trim to SEQUENCE_LENGTH
             mfccs = mfccs[:SEQUENCE_LENGTH, :]
-            
-        # Clean up
-        os.remove(temp_audio_path)
-        
+
         return mfccs
     
     def predict_with_lipnet(self, video_path):
@@ -257,31 +279,43 @@ class LipReaderSystem:
             'confidence': np.max(prediction),
             'processing_time': elapsed_time
         }
-    
+
     def predict_with_multimodal(self, video_path):
         """Predict text using both visual and audio features"""
         start_time = time.time()
-        
-        # Extract mouth frames
-        mouth_frames = self.extract_mouth_frames(video_path)
-        mouth_frames = np.expand_dims(mouth_frames, axis=0)
 
-        # Reshape mouth frames to have the same number of channels as audio features
-        if len(mouth_frames.shape) == 2:
-            mouth_frames = mouth_frames[:, :, None]
-        
+        # Extract mouth frames with correct dimensions
+        mouth_frames = self.extract_mouth_frames(video_path)  # Now returns shape (75, 64, 128, 3)
+
+        # Add batch dimension
+        mouth_frames = np.expand_dims(mouth_frames, axis=0)  # Shape (1, 75, 64, 128, 3)
+
         # Extract audio features
-        audio_features = self.extract_audio_features(video_path)
+        audio_features = self.extract_audio_features_alternative(video_path)
+
+        # Resize audio features to match sequence length if needed
+        if audio_features.shape[0] != SEQUENCE_LENGTH:
+            # Resize to match what the audio branch expects
+            resized_audio = np.zeros((SEQUENCE_LENGTH, audio_features.shape[1]))
+            min_len = min(SEQUENCE_LENGTH, audio_features.shape[0])
+            resized_audio[:min_len] = audio_features[:min_len]
+            audio_features = resized_audio
+
+        # Add batch dimension
         audio_features = np.expand_dims(audio_features, axis=0)
-        
+
+        # Print shapes for debugging
+        print(f"Mouth frames shape: {mouth_frames.shape}")
+        print(f"Audio features shape: {audio_features.shape}")
+
         # Predict with multimodal model
         prediction = self.multimodal_model.predict([mouth_frames, audio_features])
-        
+
         # Decode prediction
         decoded_text = self.decode_prediction(prediction[0])
-        
+
         elapsed_time = time.time() - start_time
-        
+
         return {
             'text': decoded_text,
             'confidence': np.max(prediction),
@@ -428,6 +462,7 @@ if __name__ == "__main__":
     
     # Example ground truth (you would replace this with actual ground truth)
     ground_truth_text = "ABOUT"
+    # ground_truth_text = "HI"
     
     # Run evaluation
     comparison_results = lip_reader.evaluate_models(VIDEO_PATH, ground_truth_text)
