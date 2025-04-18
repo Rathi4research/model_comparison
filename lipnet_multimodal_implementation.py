@@ -50,7 +50,7 @@ class LipReaderSystem:
         # self.lipnet_model.compile(optimizer=Adam(learning_rate=0.0001),
         #                           loss={'ctc': lambda y_true, y_pred: y_pred})
         # Create multimodal model
-        # self.multimodal_model = self._build_multimodal_model()
+        self.multimodal_model = self._build_multimodal_model()
 
     def load_model(self):
         """Load pre-trained LipNet model"""
